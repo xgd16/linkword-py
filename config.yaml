@@ -13,7 +13,7 @@ log:
 ai:
   dmxapi:
     baseUrl: "https://www.dmxapi.cn/v1"
-    model: "gpt-5-mini"
+    model: "deepseek-chat"
     # apiKey 支持环境变量 AI_API_KEY 或 DMXAPI_API_KEY，也可在此配置
     apiKey: "sk-yWSdWNOzilCBsRHnIiZMdwk4ZPyycOAXvUeU6nP5Dr2FKM7a"
   # 文章配图生成：OpenAI 兼容 /images/generations，保存到 admin/public/upload/covers
@@ -21,3 +21,5 @@ ai:
     model: "doubao-seedream-4-5-251128"  # 可用 dall-e-3、dall-e-2、doubao-seedream-4-5-251128、doubao-seedream-5-0-lite
     # 配图保存目录：Go admin 的 public/upload/covers（需 py_server 可写，同机部署用绝对路径）
     outputDir: "../admin/public/upload/covers"
+    # 轮播图保存目录（可选，不填则在 covers 同级自动使用 banners）
+    bannerOutputDir: "../admin/public/upload/banners"

@@ -53,7 +53,11 @@ class _ArticleAiFillOutput(BaseModel):
     )
 
 
-def _get_llm() -> ChatOpenAI:
+def _get_llm(
+    *,
+    temperature: float = 0.7,
+    max_tokens: int | None = None,
+) -> ChatOpenAI:
     """从配置创建 OpenAI 兼容的 LLM"""
     api_key = os.environ.get("AI_API_KEY") or os.environ.get("DMXAPI_API_KEY")
     cfg = load_config()
@@ -67,14 +71,17 @@ def _get_llm() -> ChatOpenAI:
         )
     base_url = dmx.get("baseUrl", "https://www.dmxapi.cn/v1")
     model = dmx.get("model", "gpt-4o-mini")
-    return ChatOpenAI(
-        api_key=str(api_key).strip(),
-        base_url=base_url,
-        model=model,
-        temperature=0.7,
-        timeout=600,
-        max_retries=1,
-    )
+    kwargs: dict = {
+        "api_key": str(api_key).strip(),
+        "base_url": base_url,
+        "model": model,
+        "temperature": temperature,
+        "timeout": 600,
+        "max_retries": 1,
+    }
+    if max_tokens is not None:
+        kwargs["model_kwargs"] = {"max_tokens": max_tokens}
+    return ChatOpenAI(**kwargs)
 
 
 @router.post("/ai-fill", response_model=ArticleAiFillResponse)
@@ -146,3 +153,85 @@ async def article_ai_fill(req: ArticleAiFillRequest) -> ArticleAiFillResponse:
     except Exception as e:
         logger.warning("AI 返回解析失败: %s", text[:200] if text else "", exc_info=True)
         raise HTTPException(status_code=500, detail=f"AI 返回解析失败: {str(e)}") from e
+
+
+class ArticleAiTranslateRequest(BaseModel):
+    title: str = ""
+    summary: str = ""
+    content: str = ""
+
+
+class ArticleAiTranslateResponse(BaseModel):
+    titleEn: str = ""
+    summaryEn: str = ""
+    contentEn: str = ""
+
+
+class _ArticleTranslateShortOutput(BaseModel):
+    """标题与摘要英译，供 PydanticOutputParser 使用"""
+
+    titleEn: str = Field(description="中文标题的英文翻译；若源标题为空则返回空字符串")
+    summaryEn: str = Field(description="中文摘要的英文翻译；若源摘要为空则返回空字符串")
+
+
+@router.post("/ai-translate", response_model=ArticleAiTranslateResponse)
+async def article_ai_translate(req: ArticleAiTranslateRequest) -> ArticleAiTranslateResponse:
+    """
+    将文章的中文标题、摘要、Markdown 正文翻译为英文，用于填充后台英文字段。
+    正文单独走纯文本输出，避免超长 Markdown 在 JSON 里转义失败。
+    """
+    title = (req.title or "").strip()
+    summary = (req.summary or "").strip()
+    content = (req.content or "").strip()
+    if not title and not summary and not content:
+        raise HTTPException(status_code=400, detail="请至少填写中文标题、摘要或正文中的一项")
+
+    title_en = ""
+    summary_en = ""
+    content_en = ""
+
+    if title or summary:
+        parser = PydanticOutputParser(pydantic_object=_ArticleTranslateShortOutput)
+        format_instructions = parser.get_format_instructions()
+        llm = _get_llm(temperature=0.25, max_tokens=2048)
+        prompt = f"""你是专业中英翻译。将下列博客字段译为自然、地道的英文，适合技术/产品类读者。
+若某项源文本为空或标记为 (none)，对应英文字段必须为空字符串，不要编造。
+
+源标题：{title if title else "(none)"}
+源摘要：{summary if summary else "(none)"}
+
+{format_instructions}
+"""
+        try:
+            msg = llm.invoke(prompt)
+            text = (msg.content or "").strip()
+            parsed = parser.parse(text)
+            if title:
+                title_en = (parsed.titleEn or "").strip()[:256]
+            if summary:
+                summary_en = (parsed.summaryEn or "").strip()[:2000]
+        except Exception as e:
+            logger.exception("标题/摘要翻译失败")
+            raise HTTPException(status_code=500, detail=f"标题/摘要翻译失败: {str(e)}") from e
+
+    if content:
+        llm = _get_llm(temperature=0.25, max_tokens=16384)
+        prompt = f"""You are a professional translator. Translate the following Chinese Markdown into natural English.
+Preserve Markdown structure exactly (headings, lists, fences, links, image syntax); translate only the Chinese prose inside.
+Do not add any preamble or explanation — output ONLY the translated Markdown.
+
+---SOURCE---
+{content}
+---END---"""
+        try:
+            msg = llm.invoke(prompt)
+            content_en = (msg.content or "").strip()[:100000]
+        except Exception as e:
+            logger.exception("正文翻译失败")
+            raise HTTPException(status_code=500, detail=f"正文翻译失败: {str(e)}") from e
+
+    return ArticleAiTranslateResponse(
+        titleEn=title_en,
+        summaryEn=summary_en,
+        contentEn=content_en,
+    )

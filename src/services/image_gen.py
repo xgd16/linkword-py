@@ -58,13 +58,24 @@ def _get_base_url() -> str:
     return str(base).rstrip("/")
 
 
-def generate_and_save_cover(prompt: str, *, size: str | None = None) -> str | None:
-    """
-    生成配图，下载后转 webp 保存到配置目录。
+def _resolve_output_dir(output_dir_raw: str) -> Path:
+    out_path = Path(output_dir_raw)
+    if not out_path.is_absolute():
+        out_path = (ROOT_DIR / out_path).resolve()
+    out_path.mkdir(parents=True, exist_ok=True)
+    return out_path
 
-    :param prompt: 图像描述提示词（建议 80-400 字）
-    :param size: 可选，不填则按模型自动选择合规尺寸
-    :return: 路径如 "/upload/covers/xxx.webp"，失败返回 None
+
+def _generate_and_save_webp(
+    prompt: str,
+    *,
+    out_path: Path,
+    public_url_prefix: str,
+    size: str | None = None,
+) -> str | None:
+    """
+    调用 images/generations，下载并保存为 webp。
+    public_url_prefix 如 /upload/covers、/upload/banners（对应 Go static /upload 下子目录）
     """
     api_key = _get_api_key()
     if not api_key:
@@ -73,13 +84,7 @@ def generate_and_save_cover(prompt: str, *, size: str | None = None) -> str | No
 
     img_cfg = _get_image_gen_config()
     model = img_cfg.get("model", "dall-e-3")
-    output_dir_raw = img_cfg.get("outputDir", "uploads/covers")
     size = size or _get_image_size(model)
-
-    out_path = Path(output_dir_raw)
-    if not out_path.is_absolute():
-        out_path = (ROOT_DIR / out_path).resolve()
-    out_path.mkdir(parents=True, exist_ok=True)
 
     url = f"{_get_base_url()}/images/generations"
     payload = {
@@ -91,7 +96,7 @@ def generate_and_save_cover(prompt: str, *, size: str | None = None) -> str | No
     }
 
     try:
-        with httpx.Client(timeout=60.0) as client:
+        with httpx.Client(timeout=120.0) as client:
             resp = client.post(
                 url,
                 json=payload,
@@ -117,9 +122,8 @@ def generate_and_save_cover(prompt: str, *, size: str | None = None) -> str | No
 
     logger.info("配图生成成功，正在下载保存: %s", img_url[:80])
 
-    # 下载图片
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=60.0) as client:
             dl_resp = client.get(img_url)
         if dl_resp.status_code != 200:
             logger.warning("下载配图失败 HTTP %s: %s", dl_resp.status_code, img_url[:80])
@@ -129,7 +133,6 @@ def generate_and_save_cover(prompt: str, *, size: str | None = None) -> str | No
         logger.warning("下载配图失败: %s", e)
         return None
 
-    # 转 webp 并保存
     suffix = uuid.uuid4().hex[:8]
     filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{suffix}.webp"
     dest = out_path / filename
@@ -142,4 +145,47 @@ def generate_and_save_cover(prompt: str, *, size: str | None = None) -> str | No
         logger.warning("图片转 webp 保存失败: %s", e)
         return None
 
-    return f"/upload/covers/{filename}"
+    prefix = public_url_prefix.rstrip("/")
+    return f"{prefix}/{filename}"
+
+
+def generate_and_save_cover(prompt: str, *, size: str | None = None) -> str | None:
+    """
+    生成配图，下载后转 webp 保存到配置目录。
+
+    :param prompt: 图像描述提示词（建议 80-400 字）
+    :param size: 可选，不填则按模型自动选择合规尺寸
+    :return: 路径如 "/upload/covers/xxx.webp"，失败返回 None
+    """
+    img_cfg = _get_image_gen_config()
+    output_dir_raw = img_cfg.get("outputDir", "uploads/covers")
+    out_path = _resolve_output_dir(output_dir_raw)
+    return _generate_and_save_webp(
+        prompt, out_path=out_path, public_url_prefix="/upload/covers", size=size
+    )
+
+
+def generate_and_save_banner(prompt: str, *, size: str | None = None) -> str | None:
+    """
+    生成轮播图用横版配图，保存到 bannerOutputDir（默认同级目录 banners）。
+
+    :return: 路径如 "/upload/banners/xxx.webp"，失败返回 None
+    """
+    img_cfg = _get_image_gen_config()
+    banner_raw = (img_cfg.get("bannerOutputDir") or "").strip()
+    if not banner_raw:
+        covers_raw = img_cfg.get("outputDir", "uploads/covers")
+        covers_path = _resolve_output_dir(covers_raw)
+        out_path = covers_path.parent / "banners"
+        out_path.mkdir(parents=True, exist_ok=True)
+    else:
+        out_path = _resolve_output_dir(banner_raw)
+    if size is None:
+        model = str(img_cfg.get("model", ""))
+        size = _get_image_size(model)
+        # DALL·E 3 支持宽幅，更适合轮播首屏
+        if "dall-e-3" in model.lower() and "dall-e-2" not in model.lower():
+            size = "1792x1024"
+    return _generate_and_save_webp(
+        prompt, out_path=out_path, public_url_prefix="/upload/banners", size=size
+    )

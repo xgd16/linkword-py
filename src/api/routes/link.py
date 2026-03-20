@@ -43,7 +43,12 @@ class _AiFillOutput(BaseModel):
     )
 
 
-def _get_llm() -> ChatOpenAI:
+def _build_llm(
+    *,
+    temperature: float = 0.7,
+    max_tokens: int | None = None,
+    timeout: int = 600,
+) -> ChatOpenAI:
     """从配置创建 OpenAI 兼容的 LLM"""
     api_key = os.environ.get("AI_API_KEY") or os.environ.get("DMXAPI_API_KEY")
     cfg = load_config()
@@ -57,12 +62,21 @@ def _get_llm() -> ChatOpenAI:
         )
     base_url = dmx.get("baseUrl", "https://www.dmxapi.cn/v1")
     model = dmx.get("model", "gpt-4o-mini")
-    return ChatOpenAI(
-        api_key=str(api_key).strip(),
-        base_url=base_url,
-        model=model,
-        temperature=0.7,
-    )
+    kwargs: dict = {
+        "api_key": str(api_key).strip(),
+        "base_url": base_url,
+        "model": model,
+        "temperature": temperature,
+        "timeout": timeout,
+        "max_retries": 1,
+    }
+    if max_tokens is not None:
+        kwargs["model_kwargs"] = {"max_tokens": max_tokens}
+    return ChatOpenAI(**kwargs)
+
+
+def _get_llm() -> ChatOpenAI:
+    return _build_llm()
 
 
 def _fetch_page_info(url: str) -> dict[str, Any]:
@@ -149,3 +163,82 @@ async def ai_fill(req: AiFillRequest) -> AiFillResponse:
     except Exception as e:
         logger.warning("AI 返回解析失败: %s", text[:200], exc_info=True)
         raise HTTPException(status_code=500, detail=f"AI 返回解析失败: {str(e)}") from e
+
+
+class LinkAiTranslateRequest(BaseModel):
+    title: str = ""
+    slogan: str = ""
+    description: str = ""
+
+
+class LinkAiTranslateResponse(BaseModel):
+    titleEn: str = ""
+    sloganEn: str = ""
+    descriptionEn: str = ""
+
+
+class _LinkTranslateShortOutput(BaseModel):
+    titleEn: str = Field(description="中文标题的英文翻译；若源标题为空则返回空字符串")
+    sloganEn: str = Field(description="中文核心标语的英文翻译；若源标语为空则返回空字符串")
+
+
+@router.post("/ai-translate", response_model=LinkAiTranslateResponse)
+async def link_ai_translate(req: LinkAiTranslateRequest) -> LinkAiTranslateResponse:
+    """
+    将导航链接的中文标题、核心标语、Markdown 详细描述译为英文，供后台英文字段使用。
+    """
+    title = (req.title or "").strip()
+    slogan = (req.slogan or "").strip()
+    description = (req.description or "").strip()
+    if not title and not slogan and not description:
+        raise HTTPException(status_code=400, detail="请至少填写中文标题、核心标语或详细描述中的一项")
+
+    title_en = ""
+    slogan_en = ""
+    description_en = ""
+
+    if title or slogan:
+        parser = PydanticOutputParser(pydantic_object=_LinkTranslateShortOutput)
+        format_instructions = parser.get_format_instructions()
+        llm = _build_llm(temperature=0.25, max_tokens=2048, timeout=600)
+        prompt = f"""你是专业中英翻译。将下列导航链接卡片字段译为自然、地道的英文，适合产品与工具导航站。
+若某项源文本为空或标记为 (none)，对应英文字段必须为空字符串，不要编造。
+
+源标题：{title if title else "(none)"}
+源核心标语：{slogan if slogan else "(none)"}
+
+{format_instructions}
+"""
+        try:
+            msg = llm.invoke(prompt)
+            text = (msg.content or "").strip()
+            parsed = parser.parse(text)
+            if title:
+                title_en = (parsed.titleEn or "").strip()[:128]
+            if slogan:
+                slogan_en = (parsed.sloganEn or "").strip()[:128]
+        except Exception as e:
+            logger.exception("标题/标语翻译失败")
+            raise HTTPException(status_code=500, detail=f"标题/标语翻译失败: {str(e)}") from e
+
+    if description:
+        llm = _build_llm(temperature=0.25, max_tokens=16384, timeout=600)
+        prompt = f"""You are a professional translator. Translate the following Chinese Markdown into natural English.
+Preserve Markdown structure (headings, lists, fences, links); translate only the Chinese prose.
+Output ONLY the translated Markdown, no preamble.
+
+---SOURCE---
+{description}
+---END---"""
+        try:
+            msg = llm.invoke(prompt)
+            description_en = (msg.content or "").strip()[:20000]
+        except Exception as e:
+            logger.exception("详细描述翻译失败")
+            raise HTTPException(status_code=500, detail=f"详细描述翻译失败: {str(e)}") from e
+
+    return LinkAiTranslateResponse(
+        titleEn=title_en,
+        sloganEn=slogan_en,
+        descriptionEn=description_en,
+    )
