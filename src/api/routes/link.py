@@ -11,6 +11,11 @@ from pydantic import BaseModel, Field
 
 from src.core.config import load_config
 from src.core.logger import logger
+from src.services.internet_search import (
+    get_web_search_settings,
+    normalize_model_json_output,
+    run_llm_with_internet_search,
+)
 
 router = APIRouter(prefix="/api/link", tags=["link"])
 
@@ -130,7 +135,12 @@ async def ai_fill(req: AiFillRequest) -> AiFillResponse:
     format_instructions = parser.get_format_instructions()
 
     llm = _get_llm()
-    prompt = f"""你是一个导航网站的文案编辑。根据以下网站信息，生成导航卡片所需的四段内容。
+    ws = get_web_search_settings()
+    system_prompt = """你是导航网站的文案编辑。
+当网页标题或描述缺失、含糊、可能过时，或你需要核实该网站的真实用途、产品线、所属公司、是否仍维护时，请使用 internet_search；仅凭已有信息已能准确写卡片时不要搜索。
+最终回复必须且只能是一段符合用户消息中格式说明的 JSON，不要添加 Markdown 代码围栏或其它说明文字。"""
+
+    user_prompt = f"""根据以下网站信息，生成导航卡片所需的四段内容。
 
 链接地址：{url}
 网页标题：{page_title or '(未获取到)'}
@@ -145,8 +155,15 @@ async def ai_fill(req: AiFillRequest) -> AiFillResponse:
 - description 使用 Markdown：**粗体**、- 列表、`代码`、## 小标题"""
 
     try:
-        msg = llm.invoke(prompt)
-        text = (msg.content or "").strip()
+        text = run_llm_with_internet_search(
+            llm,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            enabled=ws["enabled"],
+            max_results=ws["maxResults"],
+            max_tool_rounds=ws["maxToolRounds"],
+        )
+        text = normalize_model_json_output(text)
     except Exception as e:
         logger.exception("AI 调用失败")
         raise HTTPException(status_code=500, detail=f"AI 服务异常: {str(e)}") from e

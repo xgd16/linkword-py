@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field
 from src.core.config import load_config
 from src.core.logger import logger
 from src.services.image_gen import generate_and_save_cover
+from src.services.internet_search import (
+    get_web_search_settings,
+    normalize_model_json_output,
+    run_llm_with_internet_search,
+)
 
 router = APIRouter(prefix="/api/article", tags=["article"])
 
@@ -98,7 +103,12 @@ async def article_ai_fill(req: ArticleAiFillRequest) -> ArticleAiFillResponse:
     format_instructions = parser.get_format_instructions()
 
     llm = _get_llm()
-    prompt = f"""你是一位经验丰富的博客作者。根据以下关键词/主题，生成一篇完整的博客文章内容。
+    ws = get_web_search_settings()
+    system_prompt = """你是一位经验丰富的博客作者。
+当主题涉及时效性新闻、具体数据、政策或软件版本等你无法仅凭训练数据确认时，请使用 internet_search 检索要点后再写作；通识、教程类且无需核实时不要使用搜索。
+最终回复必须且只能是一段符合用户消息中格式说明的 JSON，不要添加 Markdown 代码围栏或其它说明文字。"""
+
+    user_prompt = f"""根据以下关键词/主题，生成一篇完整的博客文章内容。
 
 关键词/主题：{keywords}
 
@@ -114,8 +124,15 @@ async def article_ai_fill(req: ArticleAiFillRequest) -> ArticleAiFillResponse:
 - content 使用 Markdown 格式，结构清晰：引言、主体、总结"""
 
     try:
-        msg = llm.invoke(prompt)
-        text = (msg.content or "").strip()
+        text = run_llm_with_internet_search(
+            llm,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            enabled=ws["enabled"],
+            max_results=ws["maxResults"],
+            max_tool_rounds=ws["maxToolRounds"],
+        )
+        text = normalize_model_json_output(text)
     except Exception as e:
         logger.exception("AI 调用失败")
         raise HTTPException(status_code=500, detail=f"AI 服务异常: {str(e)}") from e

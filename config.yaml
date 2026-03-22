@@ -16,6 +16,11 @@ ai:
     model: "gpt-5-mini"
     # apiKey 支持环境变量 AI_API_KEY 或 DMXAPI_API_KEY，也可在此配置
     apiKey: "sk-yWSdWNOzilCBsRHnIiZMdwk4ZPyycOAXvUeU6nP5Dr2FKM7a"
+  # 联网搜索（DuckDuckGo）：文章/链接 AI 填表时可由模型自主调用 internet_search
+  webSearch:
+    enabled: true       # false 则退回纯模型、不发起搜索
+    maxResults: 6       # 单次搜索返回条数上限
+    maxToolRounds: 4    # 模型连续多轮调搜索的上限，防止死循环
   # 文章配图生成：OpenAI 兼容 /images/generations，保存到 admin/public/upload/covers
   imageGen:
     model: "doubao-seedream-4-5-251128"  # 可用 dall-e-3、dall-e-2、doubao-seedream-4-5-251128、doubao-seedream-5-0-lite
