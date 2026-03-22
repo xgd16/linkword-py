@@ -85,7 +85,7 @@ def _get_llm(
         "max_retries": 1,
     }
     if max_tokens is not None:
-        kwargs["model_kwargs"] = {"max_tokens": max_tokens}
+        kwargs["max_tokens"] = max_tokens
     return ChatOpenAI(**kwargs)
 
 

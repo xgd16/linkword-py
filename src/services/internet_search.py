@@ -51,10 +51,13 @@ def search_duckduckgo(query: str, *, max_results: int = 6) -> str:
         return "（未提供搜索关键词，请给出简短明确的查询词。）"
 
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
-        logger.warning("未安装 duckduckgo-search，跳过联网搜索")
-        return "搜索模块未安装，无法检索。"
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            logger.warning("未安装 ddgs（推荐 pip install ddgs）或 duckduckgo-search，跳过联网搜索")
+            return "搜索模块未安装，无法检索。"
 
     lines: list[str] = []
     try:

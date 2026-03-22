@@ -2,6 +2,7 @@
 import os
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -15,6 +16,7 @@ from src.services.internet_search import (
     get_web_search_settings,
     normalize_model_json_output,
     run_llm_with_internet_search,
+    search_duckduckgo,
 )
 
 router = APIRouter(prefix="/api/link", tags=["link"])
@@ -76,7 +78,7 @@ def _build_llm(
         "max_retries": 1,
     }
     if max_tokens is not None:
-        kwargs["model_kwargs"] = {"max_tokens": max_tokens}
+        kwargs["max_tokens"] = max_tokens
     return ChatOpenAI(**kwargs)
 
 
@@ -180,6 +182,155 @@ async def ai_fill(req: AiFillRequest) -> AiFillResponse:
     except Exception as e:
         logger.warning("AI 返回解析失败: %s", text[:200], exc_info=True)
         raise HTTPException(status_code=500, detail=f"AI 返回解析失败: {str(e)}") from e
+
+
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s\]\)\"'<>]+", re.IGNORECASE)
+
+
+def _extract_urls_from_text(text: str) -> set[str]:
+    raw = _URL_IN_TEXT_RE.findall(text or "")
+    out: set[str] = set()
+    for u in raw:
+        u = u.rstrip(").,;]")
+        if u.startswith("http://") or u.startswith("https://"):
+            out.add(u)
+    return out
+
+
+def _normalize_site_url(url: str) -> str:
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if u.startswith("http://") or u.startswith("https://"):
+        try:
+            p = urlparse(u)
+            if not p.netloc:
+                return ""
+            # 去掉明显追踪参数可留到后续；此处保留路径
+            return u.split("#", 1)[0].strip()
+        except Exception:
+            return ""
+    return ""
+
+
+class AiDiscoverRequest(BaseModel):
+    keyword: str
+    limit: int = 10
+
+
+class DiscoverSiteItem(BaseModel):
+    title: str
+    url: str
+    snippet: str = ""
+
+
+class AiDiscoverResponse(BaseModel):
+    items: list[DiscoverSiteItem]
+
+
+class _DiscoverItemOut(BaseModel):
+    title: str = Field(description="网站或产品名称，简短")
+    url: str = Field(description="完整 https 或 http 链接，须与下方检索结果中出现的 URL 完全一致")
+    snippet: str = Field(description="一句话说明为何推荐，20 字内")
+
+
+class _DiscoverListOutput(BaseModel):
+    items: list[_DiscoverItemOut] = Field(description="推荐网站列表，去重域名，优先近期仍活跃、口碑好的站点")
+
+
+@router.post("/ai-discover", response_model=AiDiscoverResponse)
+async def ai_discover(req: AiDiscoverRequest) -> AiDiscoverResponse:
+    """
+    根据关键词联网检索，由 AI 从真实搜索结果中筛选「热门好用」的网站，供后台选用后再走 ai-fill。
+    """
+    keyword = (req.keyword or "").strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="请输入搜索关键词")
+
+    lim = max(1, min(15, int(req.limit or 10)))
+
+    q_zh = f"{keyword} 好用 推荐 网站 工具"
+    q_en = f"{keyword} best popular tools website 2025"
+    blob_zh = search_duckduckgo(q_zh, max_results=12)
+    blob_en = search_duckduckgo(q_en, max_results=10)
+    combined = f"[中文检索]\n{blob_zh}\n\n[英文检索]\n{blob_en}"
+    allowed = _extract_urls_from_text(combined)
+    if not allowed:
+        raise HTTPException(
+            status_code=502,
+            detail="未能从搜索结果中得到有效链接，请更换关键词后重试",
+        )
+
+    parser = PydanticOutputParser(pydantic_object=_DiscoverListOutput)
+    format_instructions = parser.get_format_instructions()
+    llm = _build_llm(temperature=0.35, max_tokens=4096, timeout=600)
+
+    system_prompt = """你是导航站运营助手，负责从「已给出的检索摘要」里挑选值得收录的网站。
+严禁编造检索结果中未出现的 URL；每条 url 必须与摘要里的链接字符串完全一致（含协议）。
+最终回复必须且只能是一段符合格式说明的 JSON，不要 Markdown 代码围栏或其它说明。"""
+
+    user_prompt = f"""用户需求关键词：{keyword}
+需要推荐约 {lim} 个站点（可略少，务必去重主域名，优先官网与主流工具站）。
+
+以下是 DuckDuckGo 检索摘要（从中选 URL，不可臆造）：
+{combined}
+
+{format_instructions}
+
+要求：
+- items 长度不超过 {lim}
+- 每个 url 必须出现在上文摘要中
+- title 用中文简短站名/产品名
+- snippet 用中文一句话说明亮点"""
+
+    try:
+        # 摘要已含 DuckDuckGo 结果，关闭工具轮次以便严格校验 URL 均来自摘要
+        text = run_llm_with_internet_search(
+            llm,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            enabled=False,
+            max_results=6,
+            max_tool_rounds=1,
+        )
+        text = normalize_model_json_output(text)
+    except Exception as e:
+        logger.exception("AI discover 调用失败")
+        raise HTTPException(status_code=500, detail=f"AI 服务异常: {str(e)}") from e
+
+    try:
+        parsed = parser.parse(text)
+    except Exception as e:
+        logger.warning("AI discover 解析失败: %s", text[:300], exc_info=True)
+        raise HTTPException(status_code=500, detail=f"AI 返回解析失败: {str(e)}") from e
+
+    round_allowed = allowed | _extract_urls_from_text(text)
+    seen_host: set[str] = set()
+    items: list[DiscoverSiteItem] = []
+    for it in parsed.items or []:
+        if len(items) >= lim:
+            break
+        u = _normalize_site_url(it.url)
+        if not u or u not in round_allowed:
+            continue
+        try:
+            host = (urlparse(u).hostname or "").lower()
+        except Exception:
+            continue
+        if not host or host in seen_host:
+            continue
+        seen_host.add(host)
+        title = (it.title or "").strip()[:128] or host
+        sn = (it.snippet or "").strip()[:200]
+        items.append(DiscoverSiteItem(title=title, url=u, snippet=sn))
+
+    if not items:
+        raise HTTPException(
+            status_code=502,
+            detail="AI 未筛出有效站点，请尝试更具体的关键词（如「前端构建工具」「AI 编程助手」）",
+        )
+
+    return AiDiscoverResponse(items=items)
 
 
 class LinkAiTranslateRequest(BaseModel):
