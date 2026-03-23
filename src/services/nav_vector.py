@@ -1,11 +1,14 @@
-"""导航向量检索与 zvec 索引维护。"""
+"""导航向量检索与 zvec 索引维护。
+
+向量语义以 description / descriptionEn 为主。若扩展了标量字段或改过 schema，
+需删除 navVector.collectionPath 对应目录后执行全量 rebuild。
+"""
 from __future__ import annotations
 
 import os
 import threading
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import urlparse
 
 import httpx
 import zvec
@@ -34,6 +37,11 @@ class NavVectorService:
         dmx_cfg = ai_cfg.get("dmxapi", {})
         emb_cfg = ai_cfg.get("embedding", {})
         nav_cfg = cfg.get("navVector", {})
+        raw_max_score = nav_cfg.get("maxScore")
+        if raw_max_score is None and nav_cfg.get("minScore") is not None:
+            raw_max_score = nav_cfg.get("minScore")
+        max_score = 0.6 if raw_max_score is None else float(raw_max_score)
+        max_score = max(0.0, min(1.0, max_score))
 
         base_url = str(emb_cfg.get("baseUrl") or dmx_cfg.get("baseUrl") or "").rstrip("/")
         if not base_url:
@@ -77,29 +85,75 @@ class NavVectorService:
             "index_batch_size": max(1, int(nav_cfg.get("batchSize") or emb_cfg.get("batchSize") or 32)),
             "default_topk": max(1, int(nav_cfg.get("defaultTopK") or 120)),
             "search_max_results": max(1, int(nav_cfg.get("searchMaxResults") or 800)),
+            "search_max_score": max_score,
         }
 
     @staticmethod
     def _build_embedding_text(item: dict[str, Any]) -> str:
-        url = str(item.get("url") or "").strip()
-        host = ""
-        if url:
-            try:
-                host = (urlparse(url).hostname or "").replace("www.", "").strip()
-            except Exception:
-                host = ""
+        """以 description / descriptionEn 为主；无描述时回退到标题、标语、链接，避免空文本。"""
+        desc = str(item.get("description") or "").strip()
+        desc_en = str(item.get("descriptionEn") or "").strip()
+        parts: list[str] = []
+        if desc:
+            parts.append(desc)
+        if desc_en and desc_en != desc:
+            parts.append(desc_en)
+        if not parts:
+            title = str(item.get("title") or "").strip()
+            slogan = str(item.get("slogan") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if title:
+                parts.append(title)
+            if slogan:
+                parts.append(slogan)
+            if url:
+                parts.append(url)
+        text = "\n".join(parts) if parts else ""
+        return text if text.strip() else " "
 
-        parts = [
-            f"标题: {str(item.get('title') or '').strip()}",
-            f"英文标题: {str(item.get('titleEn') or '').strip()}",
-            f"标语: {str(item.get('slogan') or '').strip()}",
-            f"英文标语: {str(item.get('sloganEn') or '').strip()}",
-            f"描述: {str(item.get('description') or '').strip()}",
-            f"英文描述: {str(item.get('descriptionEn') or '').strip()}",
-            f"域名: {host}",
-            f"链接: {url}",
-        ]
-        return "\n".join(part for part in parts if part and not part.endswith(": "))
+    _OUTPUT_FIELDS: list[str] = [
+        "category_id",
+        "title",
+        "title_en",
+        "url",
+        "icon",
+        "cover",
+        "slogan",
+        "slogan_en",
+        "description",
+        "description_en",
+        "sort",
+    ]
+
+    @staticmethod
+    def _fields_to_search_meta(fields: dict[str, Any] | None) -> dict[str, Any]:
+        f = fields or {}
+        return {
+            "categoryId": int(f.get("category_id") or 0),
+            "title": str(f.get("title") or ""),
+            "titleEn": str(f.get("title_en") or ""),
+            "url": str(f.get("url") or ""),
+            "icon": str(f.get("icon") or ""),
+            "cover": str(f.get("cover") or ""),
+            "slogan": str(f.get("slogan") or ""),
+            "sloganEn": str(f.get("slogan_en") or ""),
+            "description": str(f.get("description") or ""),
+            "descriptionEn": str(f.get("description_en") or ""),
+            "sort": int(f.get("sort") or 0),
+        }
+
+    @staticmethod
+    def _summarize_items(items: list[dict[str, Any]], max_items: int = 8) -> str:
+        if not items:
+            return "[]"
+        parts: list[str] = []
+        for item in items[:max_items]:
+            title = str(item.get("title") or item.get("titleEn") or "").strip() or f"id={item.get('id')}"
+            score = float(item.get("score") or 0.0)
+            parts.append(f"{item.get('id')}:{score:.4f}:{title}")
+        if len(items) > max_items:
+            parts.append(f"...(+{len(items) - max_items})")
+        return "[" + " | ".join(parts) + "]"
 
     def _embed_texts(self, texts: list[str], settings: dict[str, Any]) -> list[list[float]]:
         if not texts:
@@ -176,9 +230,14 @@ class NavVectorService:
                         index_param=zvec.InvertIndexParam(enable_range_optimization=True),
                     ),
                     zvec.FieldSchema(name="title", data_type=zvec.DataType.STRING, nullable=True),
+                    zvec.FieldSchema(name="title_en", data_type=zvec.DataType.STRING, nullable=True),
                     zvec.FieldSchema(name="url", data_type=zvec.DataType.STRING, nullable=True),
+                    zvec.FieldSchema(name="icon", data_type=zvec.DataType.STRING, nullable=True),
+                    zvec.FieldSchema(name="cover", data_type=zvec.DataType.STRING, nullable=True),
                     zvec.FieldSchema(name="slogan", data_type=zvec.DataType.STRING, nullable=True),
+                    zvec.FieldSchema(name="slogan_en", data_type=zvec.DataType.STRING, nullable=True),
                     zvec.FieldSchema(name="description", data_type=zvec.DataType.STRING, nullable=True),
+                    zvec.FieldSchema(name="description_en", data_type=zvec.DataType.STRING, nullable=True),
                     zvec.FieldSchema(
                         name="sort",
                         data_type=zvec.DataType.INT64,
@@ -235,9 +294,14 @@ class NavVectorService:
                     fields={
                         "category_id": int(item.get("categoryId") or 0),
                         "title": str(item.get("title") or "").strip(),
+                        "title_en": str(item.get("titleEn") or "").strip(),
                         "url": str(item.get("url") or "").strip(),
+                        "icon": str(item.get("icon") or "").strip(),
+                        "cover": str(item.get("cover") or "").strip(),
                         "slogan": str(item.get("slogan") or "").strip(),
+                        "slogan_en": str(item.get("sloganEn") or "").strip(),
                         "description": str(item.get("description") or "").strip(),
+                        "description_en": str(item.get("descriptionEn") or "").strip(),
                         "sort": int(item.get("sort") or 0),
                     },
                 )
@@ -316,26 +380,57 @@ class NavVectorService:
         filter_expr = None
         if category_id is not None and int(category_id) > 0:
             filter_expr = f"category_id = {int(category_id)}"
+        logger.info(
+            "导航向量检索开始 keyword=%r category_id=%s limit=%d offset=%d topk=%d max_score=%.4f filter=%s",
+            kw,
+            category_id,
+            limit,
+            offset,
+            topk,
+            settings["search_max_score"],
+            filter_expr or "<none>",
+        )
 
         docs = collection.query(
             vectors=zvec.VectorQuery(field_name="embedding", vector=query_vector),
             topk=topk,
             filter=filter_expr,
-            output_fields=["sort"],
+            output_fields=self._OUTPUT_FIELDS,
         )
-        items = [
-            {
-                "id": int(doc.id),
-                "score": float(doc.score or 0.0),
-                "sort": int((doc.fields or {}).get("sort") or 0),
-            }
-            for doc in docs
-        ]
-        items.sort(key=lambda item: (-item["score"], -item["sort"], item["id"]))
+        raw_items: list[dict[str, Any]] = []
+        for doc in docs:
+            fields = doc.fields or {}
+            meta = self._fields_to_search_meta(fields if isinstance(fields, dict) else {})
+            raw_items.append(
+                {
+                    "id": int(doc.id),
+                    "score": float(doc.score or 0.0),
+                    **meta,
+                }
+            )
+        logger.info(
+            "导航向量原始候选 raw_count=%d top=%s",
+            len(raw_items),
+            self._summarize_items(raw_items),
+        )
+        max_score = settings["search_max_score"]
+        items: list[dict[str, Any]] = []
+        for item in raw_items:
+            score = float(item["score"] or 0.0)
+            if score > max_score:
+                continue
+            items.append(item)
+        items.sort(key=lambda item: (item["score"], -item["sort"], item["id"]))
         total = len(items)
         sliced = items[offset : offset + limit]
+        logger.info(
+            "导航向量过滤完成 kept=%d returned=%d top=%s",
+            total,
+            len(sliced),
+            self._summarize_items(sliced),
+        )
         return {
-            "items": [{"id": item["id"], "score": item["score"]} for item in sliced],
+            "items": sliced,
             "total": total,
             "truncated": total >= settings["search_max_results"],
         }

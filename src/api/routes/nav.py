@@ -43,6 +43,17 @@ class NavVectorSearchRequest(BaseModel):
 class NavVectorSearchItem(BaseModel):
     id: int
     score: float
+    categoryId: int = 0
+    title: str = ""
+    titleEn: str = ""
+    url: str = ""
+    icon: str = ""
+    cover: str = ""
+    slogan: str = ""
+    sloganEn: str = ""
+    description: str = ""
+    descriptionEn: str = ""
+    sort: int = 0
 
 
 class NavVectorSearchResponse(BaseModel):
@@ -88,11 +99,24 @@ async def rebuild_nav_vector(req: NavVectorUpsertRequest) -> dict[str, int]:
 @router.post("/search", response_model=NavVectorSearchResponse)
 async def search_nav_vector(req: NavVectorSearchRequest) -> NavVectorSearchResponse:
     try:
+        logger.info(
+            "收到导航检索请求 keyword=%r categoryId=%s limit=%d offset=%d",
+            req.keyword,
+            req.categoryId,
+            req.limit,
+            req.offset,
+        )
         data = nav_vector_service.search(
             keyword=req.keyword,
             category_id=req.categoryId,
             limit=max(1, min(200, req.limit)),
             offset=max(0, req.offset),
+        )
+        logger.info(
+            "导航检索响应 total=%d returned=%d truncated=%s",
+            data.get("total", 0),
+            len(data.get("items", [])),
+            data.get("truncated", False),
         )
         return NavVectorSearchResponse(**data)
     except Exception as exc:

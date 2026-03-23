@@ -49,5 +49,6 @@ navVector:
   collectionName: "nav_links"
   metricType: "COSINE"   # COSINE | IP | L2
   batchSize: 32
+  maxScore: 0.60         # 分数越小越相关；高于该分数的候选不返回
   searchMaxResults: 800  # 单次搜索最多拉取多少候选，用于分页切片
   defaultTopK: 120       # 未指定时的候选数

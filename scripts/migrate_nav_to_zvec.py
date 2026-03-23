@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """将数据库中的导航数据迁移到 zvec 向量库。
 
+若 py_server 升级后扩展了 zvec 标量字段，请先删除配置中的 navVector.collectionPath
+目录再执行迁移（否则会与旧 schema 不兼容）。
+
 用法:
   # 使用 admin 配置文件中的数据库连接（默认）
   uv run python scripts/migrate_nav_to_zvec.py
