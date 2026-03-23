@@ -16,6 +16,16 @@ ai:
     model: "gpt-5-mini"
     # apiKey 支持环境变量 AI_API_KEY 或 DMXAPI_API_KEY，也可在此配置
     apiKey: "sk-yWSdWNOzilCBsRHnIiZMdwk4ZPyycOAXvUeU6nP5Dr2FKM7a"
+  # 向量检索 Embedding 模型配置（OpenAI 兼容 /embeddings）
+  embedding:
+    baseUrl: "https://www.dmxapi.cn/v1"
+    model: "text-embedding-3-small"
+    # apiKey 支持环境变量 AI_EMBEDDING_API_KEY -> AI_API_KEY -> DMXAPI_API_KEY，也可在此配置
+    apiKey: "sk-yWSdWNOzilCBsRHnIiZMdwk4ZPyycOAXvUeU6nP5Dr2FKM7a"
+    # 可选；留空时首次建库会自动探测维度
+    dimensions: 0
+    batchSize: 32
+    timeout: 120
   # 联网搜索（DuckDuckGo）：文章/链接 AI 填表时可由模型自主调用 internet_search
   webSearch:
     enabled: true       # false 则退回纯模型、不发起搜索
@@ -28,3 +38,16 @@ ai:
     outputDir: "../admin/public/upload/covers"
     # 轮播图保存目录（可选，不填则在 covers 同级自动使用 banners）
     bannerOutputDir: "../admin/public/upload/banners"
+    
+    # outputDir: "/www/wwwroot/linkword_go_service/public/upload/covers"
+    # # 轮播图保存目录（可选，不填则在 covers 同级自动使用 banners）
+    # bannerOutputDir: "/www/wwwroot/linkword_go_service/public/upload/banners"
+
+# zvec 导航向量库配置
+navVector:
+  collectionPath: "./data/zvec/nav_links"
+  collectionName: "nav_links"
+  metricType: "COSINE"   # COSINE | IP | L2
+  batchSize: 32
+  searchMaxResults: 800  # 单次搜索最多拉取多少候选，用于分页切片
+  defaultTopK: 120       # 未指定时的候选数
