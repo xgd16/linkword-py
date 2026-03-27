@@ -39,9 +39,9 @@ ai:
     # 轮播图保存目录（可选，不填则在 covers 同级自动使用 banners）
     bannerOutputDir: "../admin/public/upload/banners"
     
-    # outputDir: "/www/wwwroot/linkword_go_service/public/upload/covers"
+    # outputDir: "/www/wwwroot/linkwordx_go_service/public/upload/covers"
     # # 轮播图保存目录（可选，不填则在 covers 同级自动使用 banners）
-    # bannerOutputDir: "/www/wwwroot/linkword_go_service/public/upload/banners"
+    # bannerOutputDir: "/www/wwwroot/linkwordx_go_service/public/upload/banners"
 
 # zvec 导航向量库配置
 navVector:
