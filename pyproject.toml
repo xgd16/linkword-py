@@ -16,3 +16,10 @@ dependencies = [
     "zvec>=0.2.1",
     "pymysql>=1.1.0",
 ]
+
+# 国内 PyPI 镜像：default=true 时不再访问 pypi.org，仅从此索引解析/下载
+# 其他镜像可将 url 改为：https://mirrors.aliyun.com/pypi/simple/
+[[tool.uv.index]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
